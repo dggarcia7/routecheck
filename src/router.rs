@@ -109,6 +109,60 @@ pub fn method_matches(route_method: &str, request_method: &str) -> bool {
     route_method == "*" || route_method.eq_ignore_ascii_case(request_method)
 }
 
+/// True if every request that route `b`'s method would accept is also
+/// accepted by route `a`'s method. A "*" route absorbs every other method;
+/// otherwise the two methods have to match exactly (case-insensitively).
+/// Note this isn't symmetric: a "*" route does not fully overlap a specific
+/// one, since the specific route still gets other methods "*" would also see.
+pub fn method_fully_overlaps(a: &str, b: &str) -> bool {
+    a == "*" || a.eq_ignore_ascii_case(b)
+}
+
+/// True if every concrete path that pattern `b` can match is also matched
+/// by pattern `a`. When this holds and `a` comes first in the route table,
+/// `b` can never be reached: `a` shadows it.
+pub fn shadows(a: &[Segment], b: &[Segment]) -> bool {
+    let mut i = 0;
+    loop {
+        match (a.get(i), b.get(i)) {
+            (Some(Segment::Wildcard(_)), _) => return true,
+            (Some(Segment::Static(sa)), Some(Segment::Static(sb))) => {
+                if sa != sb {
+                    return false;
+                }
+            }
+            (Some(Segment::Param(_)), Some(Segment::Static(_) | Segment::Param(_))) => {}
+            (None, None) => return true,
+            _ => return false,
+        }
+        i += 1;
+    }
+}
+
+/// One route in the table that can never be reached because an earlier
+/// route with an overlapping method matches every path it does.
+pub struct ShadowedRoute<'a> {
+    pub shadowed: &'a Route,
+    pub shadowed_by: &'a Route,
+}
+
+/// Scans a route table top to bottom and reports routes that a preceding
+/// route has already made unreachable.
+pub fn find_shadowed(routes: &[Route]) -> Vec<ShadowedRoute<'_>> {
+    let mut issues = Vec::new();
+    for (j, later) in routes.iter().enumerate() {
+        for earlier in &routes[..j] {
+            if method_fully_overlaps(&earlier.method, &later.method)
+                && shadows(&earlier.segments, &later.segments)
+            {
+                issues.push(ShadowedRoute { shadowed: later, shadowed_by: earlier });
+                break;
+            }
+        }
+    }
+    issues
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -141,5 +195,63 @@ mod tests {
     #[test]
     fn wildcard_must_be_last() {
         assert!(parse_pattern("/files/*rest/more").is_err());
+    }
+
+    #[test]
+    fn identical_patterns_shadow() {
+        let a = parse_pattern("/users/:id").unwrap();
+        let b = parse_pattern("/users/:name").unwrap();
+        assert!(shadows(&a, &b));
+    }
+
+    #[test]
+    fn param_shadows_static() {
+        let a = parse_pattern("/users/:id").unwrap();
+        let b = parse_pattern("/users/admin").unwrap();
+        assert!(shadows(&a, &b));
+        assert!(!shadows(&b, &a));
+    }
+
+    #[test]
+    fn wildcard_shadows_everything_under_prefix() {
+        let a = parse_pattern("/static/*rest").unwrap();
+        let b = parse_pattern("/static/css/site.css").unwrap();
+        assert!(shadows(&a, &b));
+    }
+
+    #[test]
+    fn different_lengths_do_not_shadow() {
+        let a = parse_pattern("/users/:id").unwrap();
+        let b = parse_pattern("/users/:id/posts").unwrap();
+        assert!(!shadows(&a, &b));
+        assert!(!shadows(&b, &a));
+    }
+
+    #[test]
+    fn diverging_static_segments_do_not_shadow() {
+        let a = parse_pattern("/users/active").unwrap();
+        let b = parse_pattern("/users/inactive").unwrap();
+        assert!(!shadows(&a, &b));
+    }
+
+    #[test]
+    fn wildcard_method_absorbs_specific_method() {
+        assert!(method_fully_overlaps("*", "GET"));
+        assert!(!method_fully_overlaps("GET", "*"));
+        assert!(method_fully_overlaps("get", "GET"));
+        assert!(!method_fully_overlaps("GET", "POST"));
+    }
+
+    #[test]
+    fn find_shadowed_reports_later_duplicate() {
+        let routes = vec![
+            parse_route_line("GET /users/:id", 1).unwrap(),
+            parse_route_line("GET /users/active", 2).unwrap(),
+            parse_route_line("POST /users/:id", 3).unwrap(),
+        ];
+        let issues = find_shadowed(&routes);
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].shadowed.line, 2);
+        assert_eq!(issues[0].shadowed_by.line, 1);
     }
 }

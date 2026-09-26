@@ -1,15 +1,25 @@
 mod router;
 
-use router::{match_segments, method_matches, parse_route_line, split_path, Route};
+use router::{find_shadowed, match_segments, method_matches, parse_route_line, split_path, Route};
 use std::env;
 use std::fs;
 use std::process::ExitCode;
 
+fn usage() {
+    eprintln!("usage: routecheck <routes-file> <method> <path>");
+    eprintln!("       routecheck --check <routes-file>");
+    eprintln!("example: routecheck routes.txt GET /users/42");
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().collect();
+
+    if args.len() == 3 && args[1] == "--check" {
+        return run_check(&args[2]);
+    }
+
     if args.len() != 4 {
-        eprintln!("usage: routecheck <routes-file> <method> <path>");
-        eprintln!("example: routecheck routes.txt GET /users/42");
+        usage();
         return ExitCode::FAILURE;
     }
     let routes_file = &args[1];
@@ -44,6 +54,35 @@ fn main() -> ExitCode {
     }
 
     println!("no match for {method} {path}");
+    ExitCode::FAILURE
+}
+
+fn run_check(routes_file: &str) -> ExitCode {
+    let routes = match load_routes(routes_file) {
+        Ok(routes) => routes,
+        Err(e) => {
+            eprintln!("routecheck: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let issues = find_shadowed(&routes);
+    if issues.is_empty() {
+        println!("no shadowed or duplicate routes found in {routes_file}");
+        return ExitCode::SUCCESS;
+    }
+
+    for issue in &issues {
+        println!(
+            "line {}: {} {} is never reached, shadowed by line {} ({} {})",
+            issue.shadowed.line,
+            issue.shadowed.method,
+            issue.shadowed.pattern,
+            issue.shadowed_by.line,
+            issue.shadowed_by.method,
+            issue.shadowed_by.pattern,
+        );
+    }
     ExitCode::FAILURE
 }
 

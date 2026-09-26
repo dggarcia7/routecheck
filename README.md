@@ -57,6 +57,24 @@ Routes are checked top to bottom and the first one that matches both the
 method and the path wins, mirroring how most routers behave. Exit status is
 0 on a match and 1 otherwise, so it can be used in scripts.
 
+## Checking for shadowed routes
+
+```
+routecheck --check <routes-file>
+```
+
+Since the first matching route wins, an earlier route can make a later one
+unreachable, whether it's a byte-for-byte duplicate or just general enough
+to catch everything the later one would have. `--check` walks the table top
+to bottom and reports every route that's shadowed this way:
+
+```
+$ routecheck --check routes.txt
+line 5: GET /users/admin is never reached, shadowed by line 3 (GET /users/:id)
+```
+
+Exit status is 0 when nothing is shadowed, 1 otherwise.
+
 ## Building
 
 Standard library only, no external dependencies.
